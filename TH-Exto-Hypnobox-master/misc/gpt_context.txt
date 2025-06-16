@@ -1,0 +1,2656 @@
+
+----- .env -----
+# Nome do projeto
+PROJECT_NAME=th_exto_hypnobox
+
+# Configurações de acesso ao banco de dados
+MYSQL_PORT=3307
+MYSQL_ROOT_PASSWORD=QPD60mmr06
+MYSQL_DATABASE=${PROJECT_NAME}
+MYSQL_USER=${PROJECT_NAME}
+MYSQL_PASSWORD=qpd60mmr06
+MYSQL_ENVIRONMENT=mysql+pymysql
+DATABASE_URL=${MYSQL_ENVIRONMENT}://${MYSQL_USER}:${MYSQL_PASSWORD}@th-exto-hypnobox-db:3306/${MYSQL_DATABASE}
+DATABASE_URL_LOCAL=${MYSQL_ENVIRONMENT}://${MYSQL_USER}:${MYSQL_PASSWORD}@localhost:3307/${MYSQL_DATABASE}
+
+# Variáveis de sistema do Hypnobox 
+
+HYPNOBOX_USER=adm_exto
+HYPNOBOX_PASS=Xzd03239adHb6320e710HYPN7922b496
+HYPNOBOX_URL=hypnobox.com.br
+HYPNOBOX_URI=api
+HYPNOBOX_PORTAL=exto
+----- Dockerfile -----
+FROM python:3
+
+# Instale o dockerize
+ENV DOCKERIZE_VERSION v0.6.1
+RUN apt-get update && apt-get install -y wget cron nano vim  \
+    && wget https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && tar -C /usr/local/bin -xzvf dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && rm dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && apt-get clean
+
+WORKDIR /app
+
+# Copiando e instalando as dependências
+COPY requirements.txt .
+RUN apt-get update
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Adicionar e configurar o crontab
+COPY crontab /etc/cron.d/crontab
+RUN chmod 0644 /etc/cron.d/crontab
+RUN crontab /etc/cron.d/crontab
+
+# Criar o arquivo de log do cron
+RUN touch /var/log/cron-TH-Exto-Hypnobox.log
+
+# Comando para rodar o cron e o aplicativo Python
+CMD cron && tail -f /var/log/cron-TH-Exto-Hypnobox.log
+----- functions/general.py -----
+from datetime import datetime
+import time, secrets, pytz, os, re, json, logging
+from dotenv import load_dotenv
+from urllib.parse import unquote
+from dotenv import load_dotenv
+
+# Formata o tempo para hh:mm:ss.ms (com 3 dígitos para ms)
+def format_time(seconds):
+    time_str = datetime.fromtimestamp(seconds).strftime('%H:%M:%S.%f')
+    return time_str[:-3]  # Trunca para obter apenas três dígitos dos milissegundos
+
+# Gera um token seguro com o comprimento especificado
+def generate_token(length=32):
+    return secrets.token_hex(length)
+
+# Retorna um timestamp já convertido para horário local
+def timestamp_now():
+    tz = pytz.timezone('America/Sao_Paulo')
+    now = datetime.now(tz)
+    return now
+
+# Retorna o valor da chave válida no sistema (obtido pelo ".env")
+def system_key():
+    load_dotenv()
+    valid_key = os.getenv('API_KEY')
+    return valid_key
+
+def exec_time(start_time):
+    end_time = time.time()
+    total_time = format_time(end_time - start_time)
+    return total_time
+
+# Decodifica, substitui '+' por espaço e remove caracteres especiais não desejados
+def clean_value(value):
+    value = unquote(value).replace('+', ' ')
+    clean_special_chars = re.sub(r'[^\w\s]', '', value)
+    clean_double_spaces = re.sub(r'\s+', ' ', clean_special_chars).strip()
+    return clean_double_spaces
+
+# Converter uma data "string" para "date"
+def str_to_datetime(date_str):
+    if date_str:
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                pass
+    return None
+
+# Salvar resposta de API em arquivo JSON
+def save_client_data_to_json(client_data):
+    # Obter o timestamp atual
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Nome do arquivo com base no timestamp
+    file_name = f"client_data_{timestamp}.json"
+    # Caminho onde o arquivo será salvo (pode ser ajustado conforme necessário)
+    file_path = f"misc/{file_name}"
+    
+    # Salvar os dados no arquivo JSON
+    with open(file_path, 'w') as json_file:
+        json.dump(client_data, json_file, indent=4)
+        
+    return file_path
+
+# Configuração do logger para gravar em um arquivo
+def logging_config():
+    
+    load_dotenv()
+    
+    if os.getenv('RUNNING_IN_DOCKER') == 'true':
+        log_path = "/var/log/api-exto.log"
+    else:
+        log_path = "api-exto.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_path),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    return logger    
+
+# Timestamp regionalizado e com data/hora separados
+def timestamp_now_ddmmaa():
+    tz = pytz.timezone('America/Sao_Paulo')
+    now = datetime.now(tz)
+    date_str = now.strftime('%d/%m/%Y')
+    time_str = now.strftime('%H:%M')
+    return date_str, time_str
+
+
+
+----- functions/hypnobox/auth.py -----
+from dotenv import load_dotenv
+import json, requests, os
+
+load_dotenv()
+
+# Montar para chamada do Hypnobox
+def hy_url():
+    hy_url = os.getenv('HYPNOBOX_URL')
+    hy_uri = os.getenv('HYPNOBOX_URI')
+    hy_portal = os.getenv('HYPNOBOX_PORTAL')
+    hy_base_url = f'https://{hy_portal}.{hy_url}/{hy_uri}'
+
+    return hy_base_url
+
+def hy_token():
+    
+    # Obter URL base
+    base_url = hy_url()
+    
+    # Endpoint de autenticação
+    hy_auth_endpoint = "auth"
+
+    # Dados de autenticação
+    login = os.getenv('HYPNOBOX_USER')
+    password = os.getenv('HYPNOBOX_PASS')
+
+    # Parâmetros da requisição
+    returnType = "json"
+
+    # Montando query string
+    params = f'?login={login}&password={password}&returnType={returnType}'
+    
+    # URL final para requisição no ENDPOINT
+    hy_conn = f'{base_url}/{hy_auth_endpoint}/{params}'
+
+    # Realiza a requisição para o Endpoint    
+    request = requests.get(hy_conn)
+
+    # Captura valores da resposta e converte para JSON
+    response = json.loads(request.text)
+
+    # Armazena apenas o Token
+    token = response['token']
+    return token
+----- functions/hypnobox/log_handler.py -----
+from datetime import datetime
+from sqlalchemy.orm import Session
+from models.log import JobLog
+from functions.db_config import SessionLocal
+
+def log_job_start(job_name, data_inicio, data_atualizacao_inicio, data_atualizacao_final, endpoint):
+    db: Session = SessionLocal()
+    job_log = JobLog(
+        job_name=job_name,
+        data_inicio=data_inicio,
+        data_atualizacao_inicio=data_atualizacao_inicio,
+        data_atualizacao_final=data_atualizacao_final,
+        endpoint=endpoint
+    )
+    db.add(job_log)
+    db.commit()
+    db.refresh(job_log)
+    db.close()
+    return job_log.id
+
+def log_job_end(job_id, num_records, unique_emails, unique_phones, status, error_message=None):
+    db: Session = SessionLocal()
+    job_log = db.query(JobLog).get(job_id)
+    job_log.end_time = datetime.now()
+    job_log.duration = (job_log.end_time - job_log.start_time).total_seconds() / 60 # Converte para minutos
+    job_log.num_records = num_records
+    job_log.unique_emails = unique_emails
+    job_log.unique_phones = unique_phones
+    job_log.status = status
+    job_log.error_message = error_message
+    db.commit()
+    db.close()
+
+----- functions/hypnobox/results_handler.py -----
+from datetime import datetime
+
+def hy_count_values(response_data):
+    
+    data = response_data['Clientes']
+
+    num_client = len(data)
+    unique_emails = set()
+    unique_phones = set()
+
+    for cliente in data:
+        if cliente['Email']:
+            unique_emails.add(cliente['Email'])
+        if cliente.get('Email2'):
+            unique_emails.add(cliente['Email2'])
+        if cliente.get('Email3'):
+            unique_emails.add(cliente['Email3'])
+
+        phone_types = ['TelResidencial', 'TelCelular', 'TelComercial', 'TelOutro']
+        ddd_types = ['DddResidencial', 'DddCelular', 'DddComercial', 'DddOutro']
+
+        for phone_type, ddd_type in zip(phone_types, ddd_types):
+            if cliente.get(phone_type) and cliente.get(ddd_type):
+                phone = f"({cliente[ddd_type]}) {cliente[phone_type]}"
+                unique_phones.add(phone)
+
+    return len(unique_emails), len(unique_phones)
+
+def hy_debug_clients(data):
+    oldest_lead = None
+    newest_lead = None
+    oldest_date = datetime.max
+    newest_date = datetime.min
+
+    # Iterar sobre cada cliente
+    for cliente in data:
+        # Converte DataUltimaInteracao em objeto datetime
+        interaction_date = datetime.strptime(cliente['DataUltimaInteracao'], '%Y-%m-%d %H:%M:%S')
+
+        # Verifica se a data atual é mais antiga que a mais antiga já encontrada
+        if interaction_date < oldest_date:
+            oldest_date = interaction_date
+            oldest_lead = cliente
+
+        # Verifica se a data atual é mais nova que a mais nova já encontrada
+        if interaction_date > newest_date:
+            newest_date = interaction_date
+            newest_lead = cliente
+
+    if oldest_lead and newest_lead:
+        print(f'Lead mais antigo:   CodCliente: {oldest_lead["CodCliente"]}   {oldest_lead["DataUltimaInteracao"]}      {oldest_lead["Nome"]}')
+        print(f'Lead mais novo:     CodCliente: {newest_lead["CodCliente"]}   {newest_lead["DataUltimaInteracao"]}      {newest_lead["Nome"]}')
+        print(f'\n')
+    else:
+        print('Não foi possível determinar leads mais antigos ou mais novos.')
+----- functions/hypnobox/messages.py -----
+from functions.db_config import SessionLocal
+from functions.hypnobox.auth import hy_url, hy_token
+from sqlalchemy.orm import Session
+from functions.hypnobox.log_handler import log_job_start, log_job_end
+from functions.general import str_to_datetime, logging_config, timestamp_now_ddmmaa
+import json, requests
+from models.hy_products import *
+
+
+# Criar instância de log
+logger = logging_config()
+
+# Função principal para atualizar produtos
+def update_messages(start_time, end_time):
+    #job_id = log_job_start("update messages", None, None, None, None)
+    #db: Session = SessionLocal()
+
+    try:
+        date, hour = timestamp_now_ddmmaa()
+        # Realizar chamada para API
+        pagination, all_messages = hy_get_all_messages(start_time, end_time)
+        total_results = sum(1 for message in all_messages if 'IDCliente' in message)
+        #messages_data = messages_call['Mensagens']
+        #messages_nav = messages_call['Paginacao']
+        #messages_pages = messages_call['Paginacao']['NumerodePaginas']
+
+        print(f'pagination:     {pagination}')
+        print(f'total_results:  {total_results}')
+        print(f'all_messages...\n{all_messages}')
+        #print(f'messages_data:\n{messages_data}')
+        #print(f'messages_nav: {messages_nav}')
+        #print(f'messages_pages: {messages_pages}')         
+
+        # Grava informações no banco de dados
+        #add_products_in_bulk(db, products_data)
+        #print("update add_products_db com sucesso")
+        #log_job_end(job_id, len(products_data), None, None, "success")
+
+    except Exception as e:
+        logger.error(f"error in update_messages: {e} {date} ({hour})")
+        print(f"error in update_messages: {e} {date} ({hour})")
+        #log_job_end(job_id, None, None, e, "error")
+
+    finally:
+        #db.close()
+        logger.info(f"update_messages fineshed {date} ({hour})")
+        print(f"update_messages fineshed {date} ({hour})")
+
+# Função para realizar chamada na API de produtos
+def hy_get_messages(start_time, end_time, page=1):
+
+    # Obter URL base
+    base_url = hy_url()
+    token = hy_token()
+    
+    # Endpoint para consulta
+    hy_auth_endpoint = "consultamensagens.json"
+
+    # Parâmetros da requisição
+    id_cliente = ""
+    id_corretor = ""
+    email_corretor = ""
+    data_cadastro_de = start_time
+    data_cadastro_ate = end_time
+    pagina = page
+    id_mensagem = ""
+
+    # Montando query string
+    params = (
+        f'?token={token}'
+        f'&id_cliente={id_cliente}'
+        f'&id_corretor={id_corretor}'
+        f'&email_corretor={email_corretor}'
+        f'&data_cadastro_de={data_cadastro_de}'
+        f'&data_cadastro_ate={data_cadastro_ate}'
+        f'&pagina={pagina}'
+        f'&id_mensagem={id_mensagem}'
+    )
+
+    # URL final para requisição no ENDPOINT
+    hy_conn = f'{base_url}/{hy_auth_endpoint}{params}'
+
+    try:
+        # Realiza a requisição para o Endpoint
+        request = requests.get(hy_conn)
+
+        # Se a resposta não for igual a "200" rtornar um "HTTPError"
+        request.raise_for_status()
+
+        # Captura a resposta e converte para um objeto Python/JSON
+        response = request.json()
+
+    except requests.RequestException as e:
+        logger.error(f"Erro ao buscar mensagens: {e}")
+        print(f"Erro ao buscar mensagens: {e}")
+        return None
+
+    return response
+
+# Função para lidar com paginação do resultado
+def hy_get_all_messages(start_time, end_time):
+    all_messages = []
+    page = 1
+    while True:
+        response = hy_get_messages(start_time, end_time, page)
+        if response is None or 'Mensagens' not in response:
+            break
+        
+        messages = response['Mensagens']
+        all_messages.extend(messages)
+        
+        pagination = response['Paginacao']
+        current_page = pagination['PaginaAtual']
+        total_pages = pagination['NumerodePaginas']
+
+        if current_page >= total_pages:
+            break
+        
+        page += 1
+
+    return pagination, all_messages
+
+# Função que mapeia a resposta da API para a MODEL
+def dict_model_products(products_data):
+    print("iniciando função: dict_model_products")
+    products = []
+
+    for product in products_data:
+
+        product_obj = HyProduct(
+            CodProduto=             product.get('CodProduto'),
+            CodInterno=             product.get('CodInterno') or None,
+            DataAtualizacao=        str_to_datetime(product.get('DataAtualizacao')),
+            CodRegional=            product.get('CodRegional') or None,
+            Produto=                product.get('Produto') or None,
+            Regional=               product.get('Regional') or None,
+            Finalidade=             product.get('Finalidade') or None,
+            IdTipoProduto=          product.get('IdTipoProduto') or None,
+            TipoProduto=            product.get('TipoProduto') or None,
+            FaseProduto=            product.get('FaseProduto') or None,
+            Descricao=              product.get('Descricao') or None,
+            AnoEntrega=             product.get('AnoEntrega') or None,
+            ValorDe=                product.get('ValorDe') or None,
+            ValorAte=               product.get('ValorAte') or None,
+            AreaUtilDe=             product.get('AreaUtilDe') or None,
+            AreaUtilAte=            product.get('AreaUtilAte') or None,
+            DormitoriosDe=          product.get('DormitoriosDe') or None,
+            DormitoriosAte=         product.get('DormitoriosAte') or None,
+            SuitesDe=               product.get('SuitesDe') or None,
+            SuitesAte=              product.get('SuitesAte') or None,
+            BanheiroDe=             product.get('BanheiroDe') or None,
+            BanheiroAte=            product.get('BanheiroAte') or None,
+            VagasDe=                product.get('VagasDe') or None,
+            VagasAte=               product.get('VagasAte') or None,
+            Caracteristicas=        product.get('Caracteristicas') or None,
+            UrlChat=                product.get('UrlChat') or None,
+
+            TotalBanheiroDe=        product.get('UnidadesDeAte', {}).get('TotalBanheiroDe') or None,
+            TotalBanheiroAte=       product.get('UnidadesDeAte', {}).get('TotalBanheiroAte') or None,
+            TotalVagaDe=            product.get('UnidadesDeAte', {}).get('TotalVagaDe') or None,
+            TotalVagaAte=           product.get('UnidadesDeAte', {}).get('TotalVagaAte') or None,
+            TotalDormitorioDe=      product.get('UnidadesDeAte', {}).get('TotalDormitorioDe') or None,
+            TotalDormitorioAte=     product.get('UnidadesDeAte', {}).get('TotalDormitorioAte') or None,
+            TotalAreaUtilDe=        product.get('UnidadesDeAte', {}).get('TotalAreaUtilDe') or None,
+            TotalAreaUtilAte=       product.get('UnidadesDeAte', {}).get('TotalAreaUtilAte') or None
+        )
+
+        # Mapear informações sobre endereço do produto
+        if any(product['Endereco'].get(field) 
+               for field in ['Cep', 'Logradouro', 'Numero', 'Complemento', 'Estado', 'Cidade', 'Bairro']) and len(product['Endereco']) > 0:
+            address = HyProductAddress(
+                Cep=product['Endereco'].get('Cep') or None,
+                Logradouro=product['Endereco'].get('Logradouro') or None,
+                Numero=product['Endereco'].get('Numero') or None,
+                Complemento=product['Endereco'].get('Complemento') or None,
+                Estado=product['Endereco'].get('Estado') or None,
+                Cidade=product['Endereco'].get('Cidade') or None,
+                Bairro=product['Endereco'].get('Bairro') or None,
+                CodProduto=product.get('CodProduto') or None,                
+            )
+            product_obj.addresses.append(address)
+
+        # Mapear informações sobre unidades do produto
+        if product.get('Unidades') and len(product['Unidades']) > 0:
+            for unit in product['Unidades']:
+                unit_obj = HyProductUnit(
+                    idUnidade=unit.get('idUnidade'),
+                    TipoUnidade=unit.get('TipoUnidade') or None,
+                    Finalidade=unit.get('Finalidade') or None,
+                    Transacao=unit.get('Transacao') or None,
+                    Valor=unit.get('Valor') or None,
+                    TotalComodos=unit.get('TotalComodos') or None,
+                    TotalDormitorio=unit.get('TotalDormitorio') or None,
+                    TotalAreaUtil=unit.get('TotalAreaUtil') or None,
+                    TotalAreaTotal=unit.get('TotalAreaTotal') or None,
+                    TotalSuite=unit.get('TotalSuite') or None,
+                    TotalBanheiro=unit.get('TotalBanheiro') or None,
+                    TotalVaga=unit.get('TotalVaga') or None,
+                    TotalPeDireito=unit.get('TotalPeDireito') or None,
+                    
+                    CodProduto=product.get('CodProduto')
+                )
+                product_obj.units.append(unit_obj)
+
+        products.append(product_obj)
+
+    return products
+
+# Função que recebe o mapeamento da MODEL e adiciona cada registro ao DB
+def add_products_in_bulk(db: Session, products_data):
+    print("iniciando função: add_products_in_bulk")
+    products = dict_model_products(products_data)
+
+    try:
+        for product in products:
+            db.merge(product)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"error in add_products_in_bulk: {e}")
+        print(f"error in add_products_in_bulk: {e}")
+        
+    finally:
+        print(f"add_products_in_bulk fineshed")
+
+----- functions/hypnobox/products.py -----
+from functions.db_config import SessionLocal
+from functions.hypnobox.auth import hy_url, hy_token
+from sqlalchemy.orm import Session
+from functions.hypnobox.log_handler import log_job_start, log_job_end
+from functions.general import str_to_datetime, logging_config, timestamp_now_ddmmaa
+import json, requests
+from models.hy_products import *
+
+
+# Criar instância de log
+logger = logging_config()
+
+# Função principal para atualizar produtos
+def update_products():
+    job_id = log_job_start("update products", None, None, None, None)
+    db: Session = SessionLocal()
+
+    try:
+        date, hour = timestamp_now_ddmmaa()
+        # Realizar chamada para API
+        products_call = hy_get_products()
+        products_data = products_call['Produtos']
+        # Grava informações no banco de dados
+        add_products_in_bulk(db, products_data)
+        print("update add_products_db com sucesso")
+        log_job_end(job_id, len(products_data), None, None, "success")
+
+    except Exception as e:
+        logger.error(f"error in update_products: {e} {date} ({hour})")
+        print(f"error in update_products: {e} {date} ({hour})")
+        log_job_end(job_id, None, None, e, "error")
+
+    finally:
+        db.close()
+        logger.info(f"update_products fineshed {date} ({hour})")
+        print(f"update_products fineshed {date} ({hour})")
+
+# Função para realizar chamada na API de produtos
+def hy_get_products():
+
+    # Obter URL base
+    base_url = hy_url()
+    token = hy_token()
+    
+    # Endpoint para consulta
+    hy_auth_endpoint = "products"
+
+    # Parâmetros da requisição
+    returnType = "json"
+
+    # Montando query string
+    params = (
+        f'?token={token}'
+        f'&returnType={returnType}'
+    )
+
+    # URL final para requisição no ENDPOINT
+    hy_conn = f'{base_url}/{hy_auth_endpoint}/{params}'
+
+    try:
+        # Realiza a requisição para o Endpoint
+        request = requests.get(hy_conn)
+
+        # Captura valores da resposta e converte para JSON
+        response = json.loads(request.text)
+
+    except Exception as e:
+        logger.error(f"Erro ao buscar produtos: {e}")
+        print(f"Erro ao buscar produtos: {e}")
+        return None
+
+    return response
+
+# Função que mapeia a resposta da API para a MODEL
+def dict_model_products(products_data):
+    print("iniciando função: dict_model_products")
+    products = []
+
+    for product in products_data:
+
+        product_obj = HyProduct(
+            CodProduto=             product.get('CodProduto'),
+            CodInterno=             product.get('CodInterno') or None,
+            DataAtualizacao=        str_to_datetime(product.get('DataAtualizacao')),
+            CodRegional=            product.get('CodRegional') or None,
+            Produto=                product.get('Produto') or None,
+            Regional=               product.get('Regional') or None,
+            Finalidade=             product.get('Finalidade') or None,
+            IdTipoProduto=          product.get('IdTipoProduto') or None,
+            TipoProduto=            product.get('TipoProduto') or None,
+            FaseProduto=            product.get('FaseProduto') or None,
+            Descricao=              product.get('Descricao') or None,
+            AnoEntrega=             product.get('AnoEntrega') or None,
+            ValorDe=                product.get('ValorDe') or None,
+            ValorAte=               product.get('ValorAte') or None,
+            AreaUtilDe=             product.get('AreaUtilDe') or None,
+            AreaUtilAte=            product.get('AreaUtilAte') or None,
+            DormitoriosDe=          product.get('DormitoriosDe') or None,
+            DormitoriosAte=         product.get('DormitoriosAte') or None,
+            SuitesDe=               product.get('SuitesDe') or None,
+            SuitesAte=              product.get('SuitesAte') or None,
+            BanheiroDe=             product.get('BanheiroDe') or None,
+            BanheiroAte=            product.get('BanheiroAte') or None,
+            VagasDe=                product.get('VagasDe') or None,
+            VagasAte=               product.get('VagasAte') or None,
+            Caracteristicas=        product.get('Caracteristicas') or None,
+            UrlChat=                product.get('UrlChat') or None,
+
+            TotalBanheiroDe=        product.get('UnidadesDeAte', {}).get('TotalBanheiroDe') or None,
+            TotalBanheiroAte=       product.get('UnidadesDeAte', {}).get('TotalBanheiroAte') or None,
+            TotalVagaDe=            product.get('UnidadesDeAte', {}).get('TotalVagaDe') or None,
+            TotalVagaAte=           product.get('UnidadesDeAte', {}).get('TotalVagaAte') or None,
+            TotalDormitorioDe=      product.get('UnidadesDeAte', {}).get('TotalDormitorioDe') or None,
+            TotalDormitorioAte=     product.get('UnidadesDeAte', {}).get('TotalDormitorioAte') or None,
+            TotalAreaUtilDe=        product.get('UnidadesDeAte', {}).get('TotalAreaUtilDe') or None,
+            TotalAreaUtilAte=       product.get('UnidadesDeAte', {}).get('TotalAreaUtilAte') or None
+        )
+
+        # Mapear informações sobre endereço do produto
+        if any(product['Endereco'].get(field) 
+               for field in ['Cep', 'Logradouro', 'Numero', 'Complemento', 'Estado', 'Cidade', 'Bairro']) and len(product['Endereco']) > 0:
+            address = HyProductAddress(
+                Cep=product['Endereco'].get('Cep') or None,
+                Logradouro=product['Endereco'].get('Logradouro') or None,
+                Numero=product['Endereco'].get('Numero') or None,
+                Complemento=product['Endereco'].get('Complemento') or None,
+                Estado=product['Endereco'].get('Estado') or None,
+                Cidade=product['Endereco'].get('Cidade') or None,
+                Bairro=product['Endereco'].get('Bairro') or None,
+                CodProduto=product.get('CodProduto') or None,                
+            )
+            product_obj.addresses.append(address)
+
+        # Mapear informações sobre unidades do produto
+        if product.get('Unidades') and len(product['Unidades']) > 0:
+            for unit in product['Unidades']:
+                unit_obj = HyProductUnit(
+                    idUnidade=unit.get('idUnidade'),
+                    TipoUnidade=unit.get('TipoUnidade') or None,
+                    Finalidade=unit.get('Finalidade') or None,
+                    Transacao=unit.get('Transacao') or None,
+                    Valor=unit.get('Valor') or None,
+                    TotalComodos=unit.get('TotalComodos') or None,
+                    TotalDormitorio=unit.get('TotalDormitorio') or None,
+                    TotalAreaUtil=unit.get('TotalAreaUtil') or None,
+                    TotalAreaTotal=unit.get('TotalAreaTotal') or None,
+                    TotalSuite=unit.get('TotalSuite') or None,
+                    TotalBanheiro=unit.get('TotalBanheiro') or None,
+                    TotalVaga=unit.get('TotalVaga') or None,
+                    TotalPeDireito=unit.get('TotalPeDireito') or None,
+                    
+                    CodProduto=product.get('CodProduto')
+                )
+                product_obj.units.append(unit_obj)
+
+        products.append(product_obj)
+
+    return products
+
+# Função que recebe o mapeamento da MODEL e adiciona cada registro ao DB
+def add_products_in_bulk(db: Session, products_data):
+    print("iniciando função: add_products_in_bulk")
+    products = dict_model_products(products_data)
+
+    try:
+        for product in products:
+            db.merge(product)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"error in add_products_in_bulk: {e}")
+        print(f"error in add_products_in_bulk: {e}")
+        
+    finally:
+        print(f"add_products_in_bulk fineshed")
+
+----- functions/hypnobox/updaters/update_clients.py -----
+from functions.hypnobox.clients import update_clients
+
+# Configurações que definem para coleta dos dados
+# Formato: YYYY-MM-DD HH:MM:SS
+
+data_inicio = "2017-01-01 00:00:00"
+data_atualizacao_inicio = "2017-01-15 00:00:00"
+data_atualizacao_final = "2017-01-31 00:00:00"
+delta = 50
+
+# Chama a função de atualização
+update_clients(data_inicio, data_atualizacao_inicio, data_atualizacao_final, delta)
+
+----- functions/hypnobox/updaters/update_products.py -----
+from functions.hypnobox.products import update_products
+
+call_products = update_products()
+----- functions/hypnobox/updaters/update_messages.py -----
+from functions.hypnobox.messages import update_messages
+
+# Configurações que definem para coleta dos dados
+# Formato: YYYY-MM-DD HH:MM:SS
+
+start_time = "2018-03-05 00:00:00"
+end_time = "2018-03-06 00:00:00"
+delta = 1
+
+# Chama a função de atualização
+update_messages(start_time, end_time)
+
+----- functions/hypnobox/updaters/__init__.py -----
+
+----- functions/hypnobox/clients.py -----
+from functions.db_config import SessionLocal
+from functions.hypnobox.auth import hy_url, hy_token
+
+from sqlalchemy.orm import Session
+
+from functions.general import str_to_datetime, save_client_data_to_json, logging_config
+from functions.hypnobox.results_handler import hy_count_values
+from functions.hypnobox.log_handler import log_job_start, log_job_end
+
+from datetime import datetime, timedelta
+import json, requests
+
+# Modelos db
+from models.hy_client import *
+
+# Criar instância de log
+logger = logging_config()
+
+# Função principal para orquestrar a atualização da base de dados
+def update_clients(data_inicio, data_atualizacao_inicio, data_atualizacao_final, delta):
+    db: Session = SessionLocal()
+    
+    try:
+        # Obtém última Data/hora do lead mais recente no DB
+        last_interaction_date = get_latest_interaction_date(db)
+
+        # Se não existir uma data no banco, usar valores padrão
+        if not last_interaction_date:
+            last_interaction_date = datetime.strptime(data_atualizacao_inicio, '%Y-%m-%d %H:%M:%S')
+
+        # Define intervalo de datas para chamada na API do Hypnobox
+        start_date = last_interaction_date  + timedelta(seconds=1)
+        end_date = start_date + timedelta(days=delta)
+
+        # Iniciar registro do LOG 
+        endpoint = f'/clients?data_inicio={data_inicio}&data_atualizacao_inicio={start_date}&data_atualizacao_final={end_date}'
+        job_id = log_job_start("update clients", data_inicio, start_date, end_date, endpoint)
+
+        # realiza Chamada na API Hypnobox
+        client_data = hy_get_clients(data_inicio, start_date, end_date)
+
+        # Gravar resposta da API em arquivo JSON
+        #json_file_path = save_client_data_to_json(client_data)
+
+        #hy_debug_clients(client_results)
+
+        # Realiza gravação no banco de dados do TH
+        add_users_in_bulk(db, client_data['Clientes'])
+
+        # Compara JSON original com dados gravados no banco
+        #verify_data_in_db(db, json_file_path)
+
+        # Gerar contagens e atualizar o log
+        unique_emails, unique_phones = hy_count_values(client_data)
+        log_job_end(job_id, len(client_data['Clientes']), unique_emails, unique_phones, "success")
+        logger.info(f"Update Realizado com sucesso")
+        print(f"Update Realizado com sucesso")
+
+    except Exception as e:
+        logger.error(f"update_clients: {e}")
+
+    finally:
+        db.close()
+
+# Função que realiza a consulta no Hypnobox e retorna a lista de usuários
+def hy_get_clients(data_inicio, data_atualizacao_inicio, data_atualizacao_final):
+    
+    # Obter URL base
+    base_url = hy_url()
+    token = hy_token()
+    
+    # Endpoint de autenticação
+    hy_auth_endpoint = "clients"
+
+    # Parâmetros da requisição
+    data_inicio = data_inicio
+    data_final = ""
+    data_atualizacao_inicio = data_atualizacao_inicio
+    data_atualizacao_final = data_atualizacao_final
+    id_produto_atual = ""
+    id_produto_origem = ""
+    id_corretor = ""
+    returnType = "json"
+
+    # Montando query string
+    params = (
+        f'?token={token}'
+        f'&data_inicio={data_inicio}'
+        f'&data_final={data_final}'
+        f'&data_atualizacao_inicio={data_atualizacao_inicio}'
+        f'&data_atualizacao_final={data_atualizacao_final}'
+        f'&id_produto_atual={id_produto_atual}'
+        f'&id_produto_origem={id_produto_origem}'
+        f'&id_corretor={id_corretor}'
+        f'&returnType={returnType}'
+    )
+
+    # URL final para requisição no ENDPOINT
+    hy_conn = f'{base_url}/{hy_auth_endpoint}/{params}'
+
+    # Realiza a requisição para o Endpoint    
+    request = requests.get(hy_conn)
+
+    # Captura valores da resposta e converte para JSON
+    response = json.loads(request.text)
+
+    return response
+
+# Consultar o banco de dados e descobrir última data de atualização captada
+def get_latest_interaction_date(db: Session):
+    latest_date = db.query(HyClient).order_by(HyClient.DataUltimaInteracao.desc()).first()
+    if latest_date:
+        return latest_date.DataUltimaInteracao
+    return None
+
+# Função para inclusão de dados do DB em massa
+def add_users_in_bulk(db: Session, client_data):
+
+    clients = map_json_to_models(client_data)
+
+    try:
+        for client in clients:
+            db.merge(client)
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"add_users_in_bulk: {e}")
+
+# Função para mapear os dados do JSON para os modelos SQLAlchemy
+def map_json_to_models(client_data):
+    clients = []
+
+    for client in client_data:
+        cod_cliente = client.get('CodCliente')
+        if not cod_cliente:
+            continue  # Skip if CodCliente is missing or None
+
+        client_obj = HyClient(
+            CodCliente=int(client['CodCliente']),
+            Nome=client['Nome'],
+            Cpf=client.get('Cpf'),
+            DataUltimaInteracao=str_to_datetime(client.get('DataUltimaInteracao')),
+            DataCadastro=str_to_datetime(client.get('DataCadastro')),
+            Momento=client.get('Momento'),
+            Submomento=client.get('Submomento'),
+            Temperatura=client.get('Temperatura'),
+            Status=client.get('Status'),
+            InactiveState=client.get('InactiveState'),
+            InactiveStateId=int(client.get('InactiveStateId')) if client.get('InactiveStateId') else None,
+            Objetivo=client.get('Objetivo')
+        )
+
+        # Mapeando emails
+        emails = [
+            HyClientEmail(email=client.get('Email'), client_id=client_obj.CodCliente),
+            HyClientEmail(email=client.get('Email2'), client_id=client_obj.CodCliente),
+            HyClientEmail(email=client.get('Email3'), client_id=client_obj.CodCliente)
+        ]
+        client_obj.emails.extend([e for e in emails if e.email])
+
+        # Mapeando telefones
+        phones = [
+            HyClientPhone(telefone=client.get('TelResidencial'), tipo='Residencial', ddd=client.get('DddResidencial'), client_id=client_obj.CodCliente),
+            HyClientPhone(telefone=client.get('TelCelular'), tipo='Celular', ddd=client.get('DddCelular'), client_id=client_obj.CodCliente),
+            HyClientPhone(telefone=client.get('TelComercial'), tipo='Comercial', ddd=client.get('DddComercial'), client_id=client_obj.CodCliente),
+            HyClientPhone(telefone=client.get('TelOutro'), tipo='Outro', ddd=client.get('DddOutro'), client_id=client_obj.CodCliente)
+        ]
+        client_obj.phones.extend([t for t in phones if t.telefone])
+
+        # Mapeando dados demográficos
+        if any(client.get(field) for field in ['estadocivil', 'NomeConjuge', 'QtdDependentes', 'ValorFgts', 'ValorEntrada', 'ValorRendaMensal', 'DataNascimento']):
+            demographic = HyClientDemographic(
+                estadocivil=client.get('estadocivil'),
+                NomeConjuge=client.get('NomeConjuge'),
+                QtdDependentes=client.get('QtdDependentes'),
+                ValorFgts=client.get('ValorFgts'),
+                ValorEntrada=client.get('ValorEntrada'),
+                ValorRendaMensal=client.get('ValorRendaMensal'),
+                DataNascimento=str_to_datetime(client.get('DataNascimento')),
+                client_id=client_obj.CodCliente
+            )
+            client_obj.demographics = demographic
+
+        # Mapeando gênero
+        if client.get('Sexo'):
+            gender = HyClientGender(
+                Sexo=client.get('Sexo'),
+                client_id=client_obj.CodCliente
+            )
+            client_obj.genders.append(gender)
+
+        # Mapeando trackings
+        if any(client.get(field) for field in ['CanalOrigem', 'MidiaOrigem', 'MidiaAtual']):
+            tracking = HyClientTracking(
+                CanalOrigem=client.get('CanalOrigem'),
+                MidiaOrigem=client.get('MidiaOrigem'),
+                MidiaAtual=client.get('MidiaAtual'),
+                client_id=client_obj.CodCliente
+            )
+            client_obj.trackings.append(tracking)
+
+        # Mapeando equipe
+        if any(client.get(field) for field in ['NomeCorretor', 'EmailCorretor', 'CpfCorretor', 'NomeGerenteGeral', 'EmailGerenteGeral', 'NomeGerente', 'EmailGerente', 'NomeCoordenador', 'EmailCoordenador', 'NomeCorretorCompartilhado', 'EmailCorretorCompartilhado', 'RegionalCorretor']):
+            team = HyClientTeam(
+                NomeCorretor=client.get('NomeCorretor'),
+                EmailCorretor=client.get('EmailCorretor'),
+                CpfCorretor=client.get('CpfCorretor'),
+                NomeGerenteGeral=client.get('NomeGerenteGeral'),
+                EmailGerenteGeral=client.get('EmailGerenteGeral'),
+                NomeGerente=client.get('NomeGerente'),
+                EmailGerente=client.get('EmailGerente'),
+                NomeCoordenador=client.get('NomeCoordenador'),
+                EmailCoordenador=client.get('EmailCoordenador'),
+                NomeCorretorCompartilhado=client.get('NomeCorretorCompartilhado'),
+                EmailCorretorCompartilhado=client.get('EmailCorretorCompartilhado'),
+                RegionalCorretor=client.get('RegionalCorretor'),
+                client_id=client_obj.CodCliente
+            )
+            client_obj.teams.append(team)
+
+        # Mapeando os endereços
+        if client.get('Endereco') and any(any(endereco.get(field) for field in ['cep', 'logradouro', 'numero', 'complemento', 'estado', 'cidade', 'bairro']) for endereco in client['Endereco'].values()):
+            enderecos = client.get('Endereco', {})
+            for tipo, endereco in enderecos.items():
+                if any(endereco.get(field) for field in ['cep', 'logradouro', 'numero', 'complemento', 'estado', 'cidade', 'bairro']):
+                    address_obj = HyClientAddress(
+                        tipo=tipo,
+                        cep=endereco.get('cep'),
+                        logradouro=endereco.get('logradouro'),
+                        numero=endereco.get('numero'),
+                        complemento=endereco.get('complemento'),
+                        estado=endereco.get('estado'),
+                        cidade=endereco.get('cidade'),
+                        bairro=endereco.get('bairro'),
+                        client_id=client_obj.CodCliente
+                    )
+                    client_obj.address = address_obj
+
+        # Mapeando os produtos de interesse
+        if client.get('ProdutosInteresse') and any(produto.get('CodProduto') for produto in client['ProdutosInteresse']):
+            produtos_interesse = client.get('ProdutosInteresse', [])
+            for produto in produtos_interesse:
+                if produto.get('CodProduto'):
+                    product_interest_obj = HyClientProductInterest(
+                        CodProduto=produto['CodProduto'],
+                        CodInterno=produto.get('CodInterno'),
+                        produto=produto['produto'],
+                        data_oferta=str_to_datetime(produto['data_oferta']),
+                        client_id=client_obj.CodCliente
+                    )
+                    client_obj.product_interests.append(product_interest_obj)
+
+        clients.append(client_obj)
+
+    return clients
+
+#Função para verificar se os dados obtidos na API realmente foram gravados no db
+def verify_data_in_db(db: Session, json_file_path: str):
+    
+    with open(json_file_path, 'r') as json_file:
+        client_data = json.load(json_file)
+    
+    for client in client_data['Clientes']:
+        db_client = db.query(HyClient).filter(HyClient.CodCliente == client['CodCliente']).first()
+        if not db_client:
+            logger.error(f"Client with CodCliente {client['CodCliente']} not found in DB.")
+        else:
+            discrepancies = []
+            if db_client.Nome != client['Nome']:
+                discrepancies.append(f"Nome mismatch: DB({db_client.Nome}) != API({client['Nome']})")
+            # Adicione outras verificações conforme necessário
+
+            if discrepancies:
+                logger.warning(f"Discrepancies for CodCliente {client['CodCliente']}:")
+                for discrepancy in discrepancies:
+                    logger.warning(f" - {discrepancy}")
+            else:
+                logger.info(f"Client with CodCliente {client['CodCliente']} found successfully with no discrepancies.")
+
+----- functions/hypnobox/__init__.py -----
+
+----- functions/db_config.py -----
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+if os.getenv('RUNNING_IN_DOCKER') == 'true':
+    DATABASE_URL = os.getenv('DATABASE_URL')
+else:
+    DATABASE_URL = os.getenv('DATABASE_URL_LOCAL')
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+----- functions/__init__.py -----
+
+----- requirements.txt -----
+# Libs para lidar com regionalização
+DateTime>=5.4
+pytz>=2024.1
+
+#Libs para lidar com variáveis de ambiente
+python-dotenv>=0.20.0
+
+# Libs para lidar com banco de dados
+SQLAlchemy>=1.4.35
+alembic>=1.8.0
+alembic[tz]
+pymysql
+
+# Libs para trabalhar com banco requisições API
+requests>=2.25.1
+
+# DEV by Tracker Hub
+# Updateline: 7
+----- alembic.ini -----
+# A generic, single database configuration.
+
+[alembic]
+# path to migration scripts
+script_location = migrations
+
+# template used to generate migration file names; The default value is %%(rev)s_%%(slug)s
+# Uncomment the line below if you want the files to be prepended with date and time
+# see https://alembic.sqlalchemy.org/en/latest/tutorial.html#editing-the-ini-file
+# for all available tokens
+# file_template = %%(year)d_%%(month).2d_%%(day).2d_%%(hour).2d%%(minute).2d-%%(rev)s_%%(slug)s
+
+# sys.path path, will be prepended to sys.path if present.
+# defaults to the current working directory.
+prepend_sys_path = .
+
+# timezone to use when rendering the date within the migration file
+# as well as the filename.
+# If specified, requires the python>=3.9 or backports.zoneinfo library.
+# Any required deps can installed by adding `alembic[tz]` to the pip requirements
+# string value is passed to ZoneInfo()
+# leave blank for localtime
+# timezone =
+
+# max length of characters to apply to the
+# "slug" field
+# truncate_slug_length = 40
+
+# set to 'true' to run the environment during
+# the 'revision' command, regardless of autogenerate
+# revision_environment = false
+
+# set to 'true' to allow .pyc and .pyo files without
+# a source .py file to be detected as revisions in the
+# versions/ directory
+# sourceless = false
+
+# version location specification; This defaults
+# to migrations/versions.  When using multiple version
+# directories, initial revisions must be specified with --version-path.
+# The path separator used here should be the separator specified by "version_path_separator" below.
+# version_locations = %(here)s/bar:%(here)s/bat:migrations/versions
+
+# version path separator; As mentioned above, this is the character used to split
+# version_locations. The default within new alembic.ini files is "os", which uses os.pathsep.
+# If this key is omitted entirely, it falls back to the legacy behavior of splitting on spaces and/or commas.
+# Valid values for version_path_separator are:
+#
+# version_path_separator = :
+# version_path_separator = ;
+# version_path_separator = space
+version_path_separator = os  # Use os.pathsep. Default configuration used for new projects.
+
+# set to 'true' to search source files recursively
+# in each "version_locations" directory
+# new in Alembic version 1.10
+# recursive_version_locations = false
+
+# the output encoding used when revision files
+# are written from script.py.mako
+# output_encoding = utf-8
+
+#sqlalchemy.url = driver://user:pass@localhost/dbname
+#sqlalchemy.url =  %(DATABASE_URL_LOCAL)s
+
+[post_write_hooks]
+# post_write_hooks defines scripts or Python functions that are run
+# on newly generated revision scripts.  See the documentation for further
+# detail and examples
+
+# format using "black" - use the console_scripts runner, against the "black" entrypoint
+# hooks = black
+# black.type = console_scripts
+# black.entrypoint = black
+# black.options = -l 79 REVISION_SCRIPT_FILENAME
+
+# lint with attempts to fix using "ruff" - use the exec runner, execute a binary
+# hooks = ruff
+# ruff.type = exec
+# ruff.executable = %(here)s/.venv/bin/ruff
+# ruff.options = --fix REVISION_SCRIPT_FILENAME
+
+# Logging configuration
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S
+
+----- models/log.py -----
+from sqlalchemy import Column, Integer, String, DateTime, Float
+from . import Base
+from datetime import datetime
+
+class JobLog(Base):
+    __tablename__ = 'job_logs'
+
+    id = Column(Integer, primary_key=True)
+    job_name = Column(String(255), nullable=False, default="update clients")
+    start_time = Column(DateTime, default=datetime.now)
+    end_time = Column(DateTime, nullable=True)
+    duration = Column(Float, nullable=True)
+    num_records = Column(Integer, nullable=True)
+    unique_emails = Column(Integer, nullable=True)
+    unique_phones = Column(Integer, nullable=True)
+    status = Column(String(50), nullable=True)
+    error_message = Column(String(255), nullable=True)
+    param_data_inicio = Column(String(50), nullable=True)
+    param_data_atualizacao_inicio = Column(String(50), nullable=True)
+    param_data_atualizacao_final = Column(String(50), nullable=True)
+    endpoint = Column(String(255), nullable=True)
+
+    def __init__(self, job_name, data_inicio, data_atualizacao_inicio, data_atualizacao_final, endpoint):
+        self.job_name = job_name
+        self.param_data_inicio = data_inicio
+        self.param_data_atualizacao_inicio = data_atualizacao_inicio
+        self.param_data_atualizacao_final = data_atualizacao_final
+        self.endpoint = endpoint
+
+----- models/hy_client.py -----
+from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey
+from sqlalchemy.orm import relationship
+from . import Base
+from datetime import datetime
+
+class HyClient(Base):
+    __tablename__ = 'hy_clients'
+
+    CodCliente = Column(Integer, primary_key=True)
+    Nome = Column(String(255))
+    Cpf = Column(String(20), nullable=True)
+    DataUltimaInteracao = Column(DateTime, nullable=True)
+    DataCadastro = Column(DateTime, nullable=True)
+    Momento = Column(String(50), nullable=True)
+    Submomento = Column(String(50), nullable=True)
+    Temperatura = Column(String(20), nullable=True)
+    Status = Column(String(50), nullable=True)
+    InactiveState = Column(String(50), nullable=True)
+    InactiveStateId = Column(Integer, nullable=True)
+    Objetivo = Column(String(50), nullable=True)
+
+    # Relationships
+    emails = relationship("HyClientEmail", back_populates="client", cascade="all, delete-orphan")
+    phones = relationship("HyClientPhone", back_populates="client", cascade="all, delete-orphan")
+    demographics = relationship("HyClientDemographic", back_populates="client", uselist=False, cascade="all, delete-orphan")
+    trackings = relationship("HyClientTracking", back_populates="client", cascade="all, delete-orphan")
+    teams = relationship("HyClientTeam", back_populates="client", cascade="all, delete-orphan")
+    address = relationship("HyClientAddress", back_populates="client", uselist=False, cascade="all, delete-orphan")
+    product_interests = relationship("HyClientProductInterest", back_populates="client", cascade="all, delete-orphan")
+    genders = relationship("HyClientGender", back_populates="client", cascade="all, delete-orphan")
+
+class HyClientEmail(Base):
+    __tablename__ = 'hy_client_emails'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+    email = Column(String(255))
+
+    client = relationship("HyClient", back_populates="emails")
+
+class HyClientPhone(Base):
+    __tablename__ = 'hy_client_phones'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+    telefone = Column(String(20))
+    tipo = Column(String(50))
+    ddd = Column(String(3))
+
+    client = relationship("HyClient", back_populates="phones")
+
+class HyClientDemographic(Base):
+    __tablename__ = 'hy_client_demographics'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+    estadocivil = Column(String(50), nullable=True)
+    NomeConjuge = Column(String(255), nullable=True)
+    QtdDependentes = Column(Integer, nullable=True)
+    ValorFgts = Column(Float, nullable=True)
+    ValorEntrada = Column(Float, nullable=True)
+    ValorRendaMensal = Column(Float, nullable=True)
+    DataNascimento = Column(DateTime, nullable=True)
+
+    client = relationship("HyClient", back_populates="demographics")
+
+class HyClientGender(Base):
+    __tablename__ = 'hy_client_genders'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+    Sexo = Column(String(10), nullable=True)
+ 
+    client = relationship("HyClient", back_populates="genders")
+
+class HyClientTracking(Base):
+    __tablename__ = 'hy_client_trackings'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+    CanalOrigem = Column(String(50), nullable=True)
+    MidiaOrigem = Column(String(255), nullable=True)
+    MidiaAtual = Column(String(255), nullable=True)
+
+    client = relationship("HyClient", back_populates="trackings")
+
+class HyClientTeam(Base):
+    __tablename__ = 'hy_client_teams'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+
+    NomeCorretor = Column(String(255), nullable=True)
+    EmailCorretor = Column(String(255), nullable=True)
+    CpfCorretor = Column(String(255), nullable=True)
+    NomeGerenteGeral = Column(String(255), nullable=True)
+    EmailGerenteGeral = Column(String(255), nullable=True)
+    NomeGerente = Column(String(255), nullable=True)
+    EmailGerente = Column(String(255), nullable=True)
+    NomeCoordenador = Column(String(255), nullable=True)
+    EmailCoordenador = Column(String(255), nullable=True)
+    NomeCorretorCompartilhado = Column(String(255), nullable=True)
+    EmailCorretorCompartilhado = Column(String(255), nullable=True)
+    RegionalCorretor = Column(String(50), nullable=True)
+
+    client = relationship("HyClient", back_populates="teams")
+
+class HyClientAddress(Base):
+    __tablename__ = 'hy_client_addresses'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+
+    tipo = Column(String(50))  # 'Residencial' ou 'Comercial'
+    cep = Column(String(20), nullable=True)
+    logradouro = Column(String(255), nullable=True)
+    numero = Column(String(20), nullable=True)
+    complemento = Column(String(255), nullable=True)
+    estado = Column(String(50), nullable=True)
+    cidade = Column(String(50), nullable=True)
+    bairro = Column(String(50), nullable=True)
+
+    client = relationship("HyClient", back_populates="address")
+
+class HyClientProductInterest(Base):
+    __tablename__ = 'hy_client_product_interests'
+
+    id = Column(Integer, primary_key=True)
+    client_id = Column(Integer, ForeignKey('hy_clients.CodCliente'))
+
+    CodProduto = Column(String(50))
+    CodInterno = Column(String(50), nullable=True)
+    produto = Column(String(255))
+    data_oferta = Column(DateTime)
+
+    client = relationship("HyClient", back_populates="product_interests")
+----- models/hy_messages.py -----
+from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey, Text, Boolean
+from sqlalchemy.orm import relationship
+from . import Base
+
+class HyDimMidia(Base):
+    __tablename__ = 'hy_dim_midia'
+    
+    id =        Column(Integer, primary_key=True)
+    midia =     Column(String(255), nullable=False)
+
+    message_midia = relationship("HyMessage", back_populates="message_midia")
+
+class HyDimGrupoMidia(Base):
+    __tablename__ = 'hy_dim_grupo_midia'
+    
+    id =                Column(Integer, primary_key=True)
+    grupo_midia =       Column(String(255), nullable=False)
+
+    message_grupo_midia = relationship("HyMessage", back_populates="message_grupo_midia")
+
+class HyDimCanal(Base):
+    __tablename__ = 'hy_dim_canal'
+    
+    IDCanal =       Column(Integer, primary_key=True,   nullable=False)
+    NomeCanal =     Column(String(255),                 nullable=False)
+
+    message_canal = relationship("HyMessage", back_populates="message_canal")
+
+class HyDimSubCanal(Base):
+    __tablename__ = 'hy_dim_sub_canal'
+    
+    IDSubCanal =       Column(Integer, primary_key=True,    nullable=False)
+    NomeSubCanal =     Column(String(255),                  nullable=False)
+
+    message_sub_canal = relationship("HyMessage", back_populates="message_sub_canal")
+
+class HyDimMomento(Base):
+    __tablename__ = 'hy_dim_momento'
+    
+    IDMomento =       Column(Integer, primary_key=True,     nullable=False)
+    NomeMomento =     Column(String(255),                   nullable=False)
+
+    message_momento = relationship("HyMessage", back_populates="message_momento")
+
+class HyDimSubMomento(Base):
+    __tablename__ = 'hy_dim_sub_momento'
+    
+    IDSubMomento =       Column(Integer, primary_key=True,  nullable=False)
+    NomeSubMomento =     Column(String(255),                nullable=False)
+
+    message_sub_momento = relationship("HyMessage", back_populates="message_sub_momento")
+
+class HyDimTemperatura(Base):
+    __tablename__ = 'hy_dim_temperatura'
+    
+    IDTemperatura =       Column(Integer, primary_key=True,  nullable=False)
+    NomeTemperatura =     Column(String(255),                nullable=False)
+
+    message_temperatura = relationship("HyMessage", back_populates="message_temperatura")
+
+class HyMessageBroker(Base):
+    __tablename__ = 'hy_message_brooker'
+    
+    # Identificação/Valores do registro e 
+    IDCorretorResponsavel =             Column(Integer, primary_key=True,   nullable=False)
+    NomeCorretorResponsavel =           Column(String(255),                 nullable=False)
+    EmailCorretorResponsavel =          Column(String(255),                 nullable=False)
+
+    # Refere-se às mensagens que estão associadas a este corretor.
+    messages = relationship("HyMessage", back_populates="message_broker")
+
+
+class HyMessageManager(Base):
+    __tablename__ = 'hy_message_manager'
+    
+    # Identificação/Valores do registro
+    IDGerenteCorretorResponsavel =             Column(Integer, primary_key=True,    nullable=False)
+    NomeGerenteCorretorResponsavel =           Column(String(255),                  nullable=False)
+    EmailGerenteCorretorResponsavel =          Column(String(255),                  nullable=False)
+
+    # Refere-se às mensagens que estão associadas a este gerente.
+    messages = relationship("HyMessage", back_populates="message_manager")
+
+class HyMessage(Base):
+    __tablename__ = 'hy_message'
+
+    # Identificação do registro
+    IDMensagemCliente =     Column(Integer, primary_key=True, nullable=False)
+    IDCliente =             Column(Integer, nullable=False)
+
+    # Datalhes da mensagem
+    StatusMensagem =       Column(String(50),  nullable=False)
+    ClienteNovo =           Column(Boolean,     nullable=False)
+    CNA =                   Column(Boolean,     nullable=False)
+    DataAtribuicao =        Column(DateTime,    nullable=True)
+
+    # Mensagem
+    Mensagem =              Column(String(255), nullable=True)
+    Assunto =               Column(String(255), nullable=True)
+    Datamensagem =          Column(DateTime,    nullable=True)
+    TipoMensagem =          Column(String(255), nullable=True)
+
+    # Campos com chaves estrangeiras
+    IDCorretorResponsavel =                 Column(Integer, ForeignKey('hy_message_brooker.IDCorretorResponsavel'),                  nullable=True)
+    IDGerenteCorretorResponsavel =          Column(Integer, ForeignKey('hy_message_manager.IDGerenteCorretorResponsavel'),           nullable=True)
+    IDProduto =                             Column(Integer, ForeignKey('hy_products.CodProduto'),           nullable=True)
+    IDCanal =                               Column(Integer, ForeignKey('hy_dim_canal.IDCanal'),             nullable=True)
+    IDSubCanal =                            Column(Integer, ForeignKey('hy_dim_sub_canal.IDSubCanal'),      nullable=True)
+    IDMomento =                             Column(Integer, ForeignKey('hy_dim_momento.IDMomento'),         nullable=True)
+    IDSubMomento =                          Column(Integer, ForeignKey('hy_dim_sub_momento.IDSubMomento'),  nullable=True)
+    IDMidia =                               Column(Integer, ForeignKey('hy_dim_midia.id'),                  nullable=True)
+    IDGrupoMidia =                          Column(Integer, ForeignKey('hy_dim_grupo_midia.id'),            nullable=True)
+    IDTemperatura =                         Column(Integer, ForeignKey('hy_dim_temperatura.IDTemperatura'), nullable=True)
+    IDEmail =                               Column(Integer, nullable=True)
+    IDTel =                                 Column(Integer, nullable=True)
+
+    # Outros (TO-DO: descobrir com qual campo essa chave se relaciona)
+    IDResponsavelCliente =  Column(Integer,     nullable=True)
+
+    # Outros campos
+    NomeCliente =           Column(String(255), nullable=False)
+
+    # Propriedades da MODEL
+    # Propriedades de relacionamento com outras tabelas
+    
+    # Quando usamos back_populates="messages", estamos dizendo que, na outra ponta do relacionamento (na classe referenciada), há um atributo chamado messages que estabelece a relação inversa.  
+    message_broker =                        relationship("HyMessageBroker",                 back_populates="messages") # Refere-se ao gerente do corretor responsável pela mensagem.
+    message_manager =                       relationship("HyMessageManager",                back_populates="messages") # Refere-se ao corretor responsável pela mensagem
+    message_canal =                         relationship("HyDimCanal",                      back_populates="message_canal")
+    message_sub_canal =                     relationship("HyDimSubCanal",                   back_populates="message_sub_canal")
+    message_momento =                       relationship("HyDimMomento",                    back_populates="message_momento")
+    message_sub_momento =                   relationship("HyDimSubMomento",                 back_populates="message_sub_momento")
+    message_temperatura =                   relationship("HyDimTemperatura",                back_populates="message_temperatura")
+    message_midia =                         relationship("HyDimMidia",                      back_populates="message_midia")
+    message_grupo_midia =                   relationship("HyDimGrupoMidia",                 back_populates="message_grupo_midia")
+    message_email =                         relationship("HyMessageEmail",                  back_populates="message_email")
+    message_tel =                           relationship("HyMessageTel",                    back_populates="message_tel")       
+
+class HyMessageTel(Base):
+    __tablename__ = 'hy_message_tel'
+    
+    IDMensagemCliente =         Column(Integer, ForeignKey('hy_message.IDMensagemCliente'), primary_key=True)
+    tel =                       Column(String(2),   nullable=False)
+    tel_ddd =                   Column(String(2),   nullable=True)
+    tel_type =                  Column(String(20),  nullable=False) # Residencial, Mensagem, Celular
+
+    message_midia = relationship("HyMessage", back_populates="message_tel")
+
+class HyMessageEmail(Base):
+    __tablename__ = 'hy_message_email'
+    
+    IDMensagemCliente =         Column(Integer, ForeignKey('hy_message.IDMensagemCliente'), primary_key=True)
+    email =                     Column(String(255),     nullable=False)
+    email_number =              Column(Integer,      nullable=False) # 1, 2 ou 3
+
+    message_midia = relationship("HyMessage", back_populates="message_email")
+
+
+# Informações úteis para consulta
+""" 
+cascade="all, delete-orphan": 
+Isso significa que todas as operações (save, update, delete, merge, etc.) 
+serão propagadas, e quaisquer registros órfãos serão excluídos automaticamente.
+
+ """
+
+----- models/hy_products.py -----
+from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from . import Base
+
+class HyProduct(Base):
+    __tablename__ = 'hy_products'
+
+    # Identificação do registro
+    CodProduto = Column(Integer, primary_key=True, nullable=False)
+
+    # Informações básicas do produto - gerais
+    CodInterno = Column(String(50), nullable=True)
+    DataAtualizacao = Column(DateTime, nullable=True)
+    CodRegional = Column(Integer, nullable=True)
+    Produto = Column(String(255), nullable=False)
+    Regional = Column(String(50), nullable=True)
+    Finalidade = Column(String(50), nullable=True)
+    IdTipoProduto = Column(Integer, nullable=True)
+    TipoProduto = Column(String(50), nullable=True)
+    FaseProduto = Column(String(50), nullable=True)
+    Descricao = Column(Text, nullable=True)
+    AnoEntrega = Column(Integer, nullable=True)
+    ValorDe = Column(Float, nullable=True)
+    ValorAte = Column(Float, nullable=True)
+    AreaUtilDe = Column(Float, nullable=True)
+    AreaUtilAte = Column(Float, nullable=True)
+    DormitoriosDe = Column(Integer, nullable=True)
+    DormitoriosAte = Column(Integer, nullable=True)
+    SuitesDe = Column(Integer, nullable=True)
+    SuitesAte = Column(Integer, nullable=True)
+    BanheiroDe = Column(Integer, nullable=True)
+    BanheiroAte = Column(Integer, nullable=True)
+    VagasDe = Column(Integer, nullable=True)
+    VagasAte = Column(Integer, nullable=True)
+    Caracteristicas = Column(Text, nullable=True)
+    UrlChat = Column(String(255), nullable=True)
+
+    # Informações básicas do produto - "UnidadesDeAte"
+    TotalBanheiroDe = Column(Integer, nullable=True)
+    TotalBanheiroAte = Column(Integer, nullable=True)
+    TotalVagaDe = Column(Integer, nullable=True)
+    TotalVagaAte = Column(Integer, nullable=True)
+    TotalDormitorioDe = Column(Integer, nullable=True)
+    TotalDormitorioAte = Column(Integer, nullable=True)
+    TotalAreaUtilDe = Column(Float, nullable=True)
+    TotalAreaUtilAte = Column(Float, nullable=True)
+
+    addresses = relationship("HyProductAddress", back_populates="product")
+    units = relationship("HyProductUnit", back_populates="product")
+
+
+class HyProductAddress(Base):
+    __tablename__ = 'hy_product_addresses'
+    
+    # Identificação do registro e chaves-estrangeiras
+    id = Column(Integer, primary_key=True)
+    CodProduto = Column(Integer, ForeignKey('hy_products.CodProduto'))
+
+    # Principais campos da tabela
+    Cep = Column(String(255), nullable=True)
+    Logradouro = Column(String(255), nullable=True)
+    Numero = Column(String(255), nullable=True)
+    Complemento = Column(String(255), nullable=True)
+    Estado = Column(String(255), nullable=True)
+    Cidade = Column(String(255), nullable=True)
+    Bairro = Column(String(255), nullable=True)
+
+    # Criando relação com a tabela de "HyProduct" 
+    product = relationship("HyProduct", back_populates="addresses")
+
+class HyProductUnit(Base):
+    __tablename__ = 'hy_product_units'
+
+    # Identificação do registro e chaves-estrangeiras
+    id = Column(Integer, primary_key=True)
+    CodProduto = Column(Integer, ForeignKey('hy_products.CodProduto'))
+
+    # Principais campos da tabela
+    idUnidade = Column(Integer, nullable=False)
+    TipoUnidade = Column(String(255), nullable=True)
+    Finalidade = Column(String(255), nullable=True)
+    Transacao = Column(String(255), nullable=True)
+    Valor = Column(Float, nullable=True)
+    TotalComodos = Column(Integer, nullable=True)
+    TotalDormitorio = Column(Integer, nullable=True)
+    TotalAreaUtil = Column(Float, nullable=True)
+    TotalAreaTotal = Column(Float, nullable=True)
+    TotalSuite = Column(Integer, nullable=True)
+    TotalBanheiro = Column(Integer, nullable=True)
+    TotalVaga = Column(Integer, nullable=True)
+    TotalPeDireito = Column(Float, nullable=True)
+
+    # Criando relação com a tabela de "HyProduct" 
+    product = relationship("HyProduct", back_populates="units")
+
+----- models/__init__.py -----
+from sqlalchemy.orm import declarative_base
+Base = declarative_base()
+
+# Importa todas as models para que Alembic possa detectá-las
+from .hy_client import *
+from .hy_products import *
+from .hy_messages import *
+from .log import JobLog
+----- docker-compose.yml -----
+version: '3.8'
+services:
+
+  python:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - log-volume:/var/log/th-exto-hypnobox
+    depends_on:
+      - db
+    environment:
+      - DATABASE_URL=${MYSQL_ENVIRONMENT}://${MYSQL_USER}:${MYSQL_PASSWORD}@db/${MYSQL_DATABASE}
+      - RUNNING_IN_DOCKER=true
+
+    command: >
+      sh -c "dockerize -wait tcp://db:3306 -timeout 30s && crontab /app/crontab && cron -f"
+
+  db:
+    image: mariadb
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - data:/var/lib/mysql
+    ports:
+      - "${MYSQL_PORT}:3306" # host:container
+
+volumes:
+  data:
+  log-volume:
+    driver: local
+
+----- migrations/versions/12c6503b0957_fix_relationships_on_model_messages.py -----
+"""fix relationships on  model messages
+
+Revision ID: 12c6503b0957
+Revises: f09688da9d02
+Create Date: 2024-06-06 23:52:00.403203
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '12c6503b0957'
+down_revision: Union[str, None] = 'f09688da9d02'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.add_column('hy_message', sa.Column('IDTemperatura', sa.Integer(), nullable=True))
+    op.create_foreign_key(None, 'hy_message', 'hy_dim_temperatura', ['IDTemperatura'], ['IDTemperatura'])
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_constraint(None, 'hy_message', type_='foreignkey')
+    op.drop_column('hy_message', 'IDTemperatura')
+    # ### end Alembic commands ###
+
+----- migrations/versions/dd7248abb3c0_fix_cod_interno_model_products.py -----
+"""fix cod interno  model products
+
+Revision ID: dd7248abb3c0
+Revises: 1f524a6aa35b
+Create Date: 2024-05-28 00:03:07.329188
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import mysql
+
+# revision identifiers, used by Alembic.
+revision: str = 'dd7248abb3c0'
+down_revision: Union[str, None] = '1f524a6aa35b'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.alter_column('hy_products', 'CodInterno',
+               existing_type=mysql.INTEGER(display_width=11),
+               type_=sa.String(length=50),
+               existing_nullable=True)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.alter_column('hy_products', 'CodInterno',
+               existing_type=sa.String(length=50),
+               type_=mysql.INTEGER(display_width=11),
+               existing_nullable=True)
+    # ### end Alembic commands ###
+
+----- migrations/versions/4023308b75b4_initial_commit.py -----
+"""Initial Commit
+
+Revision ID: 4023308b75b4
+Revises: 
+Create Date: 2024-05-21 17:44:52.816668
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '4023308b75b4'
+down_revision: Union[str, None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('hy_clients',
+    sa.Column('CodCliente', sa.Integer(), nullable=False),
+    sa.Column('Nome', sa.String(length=255), nullable=True),
+    sa.Column('Cpf', sa.String(length=20), nullable=True),
+    sa.Column('DataUltimaInteracao', sa.DateTime(), nullable=True),
+    sa.Column('DataCadastro', sa.DateTime(), nullable=True),
+    sa.Column('Momento', sa.String(length=50), nullable=True),
+    sa.Column('Submomento', sa.String(length=50), nullable=True),
+    sa.Column('Temperatura', sa.String(length=20), nullable=True),
+    sa.Column('Status', sa.String(length=50), nullable=True),
+    sa.Column('InactiveState', sa.String(length=50), nullable=True),
+    sa.Column('InactiveStateId', sa.Integer(), nullable=True),
+    sa.Column('Objetivo', sa.String(length=50), nullable=True),
+    sa.PrimaryKeyConstraint('CodCliente')
+    )
+    op.create_table('job_logs',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('job_name', sa.String(length=255), nullable=False),
+    sa.Column('start_time', sa.DateTime(), nullable=True),
+    sa.Column('end_time', sa.DateTime(), nullable=True),
+    sa.Column('duration', sa.Float(), nullable=True),
+    sa.Column('num_records', sa.Integer(), nullable=True),
+    sa.Column('unique_emails', sa.Integer(), nullable=True),
+    sa.Column('unique_phones', sa.Integer(), nullable=True),
+    sa.Column('status', sa.String(length=50), nullable=True),
+    sa.Column('error_message', sa.String(length=255), nullable=True),
+    sa.Column('param_data_inicio', sa.String(length=50), nullable=False),
+    sa.Column('param_data_atualizacao_inicio', sa.String(length=50), nullable=False),
+    sa.Column('param_data_atualizacao_final', sa.String(length=50), nullable=False),
+    sa.Column('endpoint', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_addresses',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('tipo', sa.String(length=50), nullable=True),
+    sa.Column('cep', sa.String(length=20), nullable=True),
+    sa.Column('logradouro', sa.String(length=255), nullable=True),
+    sa.Column('numero', sa.String(length=20), nullable=True),
+    sa.Column('complemento', sa.String(length=255), nullable=True),
+    sa.Column('estado', sa.String(length=50), nullable=True),
+    sa.Column('cidade', sa.String(length=50), nullable=True),
+    sa.Column('bairro', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_demographics',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('estadocivil', sa.String(length=50), nullable=True),
+    sa.Column('NomeConjuge', sa.String(length=255), nullable=True),
+    sa.Column('QtdDependentes', sa.Integer(), nullable=True),
+    sa.Column('ValorFgts', sa.Float(), nullable=True),
+    sa.Column('ValorEntrada', sa.Float(), nullable=True),
+    sa.Column('ValorRendaMensal', sa.Float(), nullable=True),
+    sa.Column('DataNascimento', sa.DateTime(), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_emails',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('email', sa.String(length=255), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_genders',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('Sexo', sa.String(length=10), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_phones',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('telefone', sa.String(length=20), nullable=True),
+    sa.Column('tipo', sa.String(length=50), nullable=True),
+    sa.Column('ddd', sa.String(length=3), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_product_interests',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('CodProduto', sa.String(length=50), nullable=True),
+    sa.Column('CodInterno', sa.String(length=50), nullable=True),
+    sa.Column('produto', sa.String(length=255), nullable=True),
+    sa.Column('data_oferta', sa.DateTime(), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_teams',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('NomeCorretor', sa.String(length=255), nullable=True),
+    sa.Column('EmailCorretor', sa.String(length=255), nullable=True),
+    sa.Column('CpfCorretor', sa.String(length=255), nullable=True),
+    sa.Column('NomeGerenteGeral', sa.String(length=255), nullable=True),
+    sa.Column('EmailGerenteGeral', sa.String(length=255), nullable=True),
+    sa.Column('NomeGerente', sa.String(length=255), nullable=True),
+    sa.Column('EmailGerente', sa.String(length=255), nullable=True),
+    sa.Column('NomeCoordenador', sa.String(length=255), nullable=True),
+    sa.Column('EmailCoordenador', sa.String(length=255), nullable=True),
+    sa.Column('NomeCorretorCompartilhado', sa.String(length=255), nullable=True),
+    sa.Column('EmailCorretorCompartilhado', sa.String(length=255), nullable=True),
+    sa.Column('RegionalCorretor', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_client_trackings',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=True),
+    sa.Column('CanalOrigem', sa.String(length=50), nullable=True),
+    sa.Column('MidiaOrigem', sa.String(length=255), nullable=True),
+    sa.Column('MidiaAtual', sa.String(length=255), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['hy_clients.CodCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('hy_client_trackings')
+    op.drop_table('hy_client_teams')
+    op.drop_table('hy_client_product_interests')
+    op.drop_table('hy_client_phones')
+    op.drop_table('hy_client_genders')
+    op.drop_table('hy_client_emails')
+    op.drop_table('hy_client_demographics')
+    op.drop_table('hy_client_addresses')
+    op.drop_table('job_logs')
+    op.drop_table('hy_clients')
+    # ### end Alembic commands ###
+
+----- migrations/versions/c807a1e687bd_cleaning_code_on_messages_model.py -----
+"""cleaning code on messages model
+
+Revision ID: c807a1e687bd
+Revises: fcac718a03a7
+Create Date: 2024-06-07 00:25:49.996491
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'c807a1e687bd'
+down_revision: Union[str, None] = 'fcac718a03a7'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+
+----- migrations/versions/1f524a6aa35b_add_model_products.py -----
+"""add model products
+
+Revision ID: 1f524a6aa35b
+Revises: 4023308b75b4
+Create Date: 2024-05-27 21:10:49.488639
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '1f524a6aa35b'
+down_revision: Union[str, None] = '4023308b75b4'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('hy_products',
+    sa.Column('CodProduto', sa.Integer(), nullable=False),
+    sa.Column('CodInterno', sa.Integer(), nullable=True),
+    sa.Column('DataAtualizacao', sa.DateTime(), nullable=True),
+    sa.Column('CodRegional', sa.Integer(), nullable=True),
+    sa.Column('Produto', sa.String(length=255), nullable=False),
+    sa.Column('Regional', sa.String(length=50), nullable=True),
+    sa.Column('Finalidade', sa.String(length=50), nullable=True),
+    sa.Column('IdTipoProduto', sa.Integer(), nullable=True),
+    sa.Column('TipoProduto', sa.String(length=50), nullable=True),
+    sa.Column('FaseProduto', sa.String(length=50), nullable=True),
+    sa.Column('Descricao', sa.Text(), nullable=True),
+    sa.Column('AnoEntrega', sa.Integer(), nullable=True),
+    sa.Column('ValorDe', sa.Float(), nullable=True),
+    sa.Column('ValorAte', sa.Float(), nullable=True),
+    sa.Column('AreaUtilDe', sa.Float(), nullable=True),
+    sa.Column('AreaUtilAte', sa.Float(), nullable=True),
+    sa.Column('DormitoriosDe', sa.Integer(), nullable=True),
+    sa.Column('DormitoriosAte', sa.Integer(), nullable=True),
+    sa.Column('SuitesDe', sa.Integer(), nullable=True),
+    sa.Column('SuitesAte', sa.Integer(), nullable=True),
+    sa.Column('BanheiroDe', sa.Integer(), nullable=True),
+    sa.Column('BanheiroAte', sa.Integer(), nullable=True),
+    sa.Column('VagasDe', sa.Integer(), nullable=True),
+    sa.Column('VagasAte', sa.Integer(), nullable=True),
+    sa.Column('Caracteristicas', sa.Text(), nullable=True),
+    sa.Column('UrlChat', sa.String(length=255), nullable=True),
+    sa.Column('TotalBanheiroDe', sa.Integer(), nullable=True),
+    sa.Column('TotalBanheiroAte', sa.Integer(), nullable=True),
+    sa.Column('TotalVagaDe', sa.Integer(), nullable=True),
+    sa.Column('TotalVagaAte', sa.Integer(), nullable=True),
+    sa.Column('TotalDormitorioDe', sa.Integer(), nullable=True),
+    sa.Column('TotalDormitorioAte', sa.Integer(), nullable=True),
+    sa.Column('TotalAreaUtilDe', sa.Float(), nullable=True),
+    sa.Column('TotalAreaUtilAte', sa.Float(), nullable=True),
+    sa.PrimaryKeyConstraint('CodProduto')
+    )
+    op.create_table('hy_product_addresses',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('CodProduto', sa.Integer(), nullable=True),
+    sa.Column('Cep', sa.String(length=255), nullable=False),
+    sa.Column('Logradouro', sa.String(length=255), nullable=False),
+    sa.Column('Numero', sa.String(length=255), nullable=False),
+    sa.Column('Complemento', sa.String(length=255), nullable=False),
+    sa.Column('Estado', sa.String(length=255), nullable=False),
+    sa.Column('Cidade', sa.String(length=255), nullable=False),
+    sa.Column('Bairro', sa.String(length=255), nullable=False),
+    sa.ForeignKeyConstraint(['CodProduto'], ['hy_products.CodProduto'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_product_units',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('CodProduto', sa.Integer(), nullable=True),
+    sa.Column('idUnidade', sa.Integer(), nullable=False),
+    sa.Column('TipoUnidade', sa.String(length=255), nullable=False),
+    sa.Column('Finalidade', sa.String(length=255), nullable=False),
+    sa.Column('Transacao', sa.String(length=255), nullable=False),
+    sa.Column('Valor', sa.Float(), nullable=True),
+    sa.Column('TotalComodos', sa.Integer(), nullable=False),
+    sa.Column('TotalDormitorio', sa.Integer(), nullable=False),
+    sa.Column('TotalAreaUtil', sa.Float(), nullable=False),
+    sa.Column('TotalAreaTotal', sa.Float(), nullable=False),
+    sa.Column('TotalSuite', sa.Integer(), nullable=False),
+    sa.Column('TotalBanheiro', sa.Integer(), nullable=False),
+    sa.Column('TotalVaga', sa.Integer(), nullable=False),
+    sa.Column('TotalPeDireito', sa.Float(), nullable=False),
+    sa.ForeignKeyConstraint(['CodProduto'], ['hy_products.CodProduto'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('hy_product_units')
+    op.drop_table('hy_product_addresses')
+    op.drop_table('hy_products')
+    # ### end Alembic commands ###
+
+----- migrations/versions/9abfa39d8118_alter_nullable_fields_on_job_logs.py -----
+"""alter nullable fields on job logs
+
+Revision ID: 9abfa39d8118
+Revises: 4f6274db1132
+Create Date: 2024-05-28 07:54:08.646659
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import mysql
+
+# revision identifiers, used by Alembic.
+revision: str = '9abfa39d8118'
+down_revision: Union[str, None] = '4f6274db1132'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.alter_column('job_logs', 'param_data_inicio',
+               existing_type=mysql.VARCHAR(length=50),
+               nullable=True)
+    op.alter_column('job_logs', 'param_data_atualizacao_inicio',
+               existing_type=mysql.VARCHAR(length=50),
+               nullable=True)
+    op.alter_column('job_logs', 'param_data_atualizacao_final',
+               existing_type=mysql.VARCHAR(length=50),
+               nullable=True)
+    op.alter_column('job_logs', 'endpoint',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.alter_column('job_logs', 'endpoint',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('job_logs', 'param_data_atualizacao_final',
+               existing_type=mysql.VARCHAR(length=50),
+               nullable=False)
+    op.alter_column('job_logs', 'param_data_atualizacao_inicio',
+               existing_type=mysql.VARCHAR(length=50),
+               nullable=False)
+    op.alter_column('job_logs', 'param_data_inicio',
+               existing_type=mysql.VARCHAR(length=50),
+               nullable=False)
+    # ### end Alembic commands ###
+
+----- migrations/versions/f09688da9d02_add_model_messages.py -----
+"""add model messages
+
+Revision ID: f09688da9d02
+Revises: 9abfa39d8118
+Create Date: 2024-06-06 23:46:56.704803
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'f09688da9d02'
+down_revision: Union[str, None] = '9abfa39d8118'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('hy_dim_canal',
+    sa.Column('IDCanal', sa.Integer(), nullable=False),
+    sa.Column('NomeCanal', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDCanal')
+    )
+    op.create_table('hy_dim_grupo_midia',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('grupo_midia', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_dim_midia',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('midia', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_dim_momento',
+    sa.Column('IDMomento', sa.Integer(), nullable=False),
+    sa.Column('NomeMomento', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDMomento')
+    )
+    op.create_table('hy_dim_sub_canal',
+    sa.Column('IDSubCanal', sa.Integer(), nullable=False),
+    sa.Column('NomeSubCanal', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDSubCanal')
+    )
+    op.create_table('hy_dim_sub_momento',
+    sa.Column('IDSubMomento', sa.Integer(), nullable=False),
+    sa.Column('NomeSubMomento', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDSubMomento')
+    )
+    op.create_table('hy_dim_temperatura',
+    sa.Column('IDTemperatura', sa.Integer(), nullable=False),
+    sa.Column('NomeTemperatura', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDTemperatura')
+    )
+    op.create_table('hy_message_brooker',
+    sa.Column('IDCorretorResponsavel', sa.Integer(), nullable=False),
+    sa.Column('NomeCorretorResponsavel', sa.String(length=255), nullable=False),
+    sa.Column('EmailCorretorResponsavel', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDCorretorResponsavel')
+    )
+    op.create_table('hy_message_manager',
+    sa.Column('IDGerenteCorretorResponsavel', sa.Integer(), nullable=False),
+    sa.Column('NomeGerenteCorretorResponsavel', sa.String(length=255), nullable=False),
+    sa.Column('EmailGerenteCorretorResponsavel', sa.String(length=255), nullable=False),
+    sa.PrimaryKeyConstraint('IDGerenteCorretorResponsavel')
+    )
+    op.create_table('hy_message',
+    sa.Column('IDMensagemCliente', sa.Integer(), nullable=False),
+    sa.Column('IDCliente', sa.Integer(), nullable=False),
+    sa.Column('StatusMensagem', sa.String(length=50), nullable=False),
+    sa.Column('ClienteNovo', sa.Boolean(), nullable=False),
+    sa.Column('CNA', sa.Boolean(), nullable=False),
+    sa.Column('DataAtribuicao', sa.DateTime(), nullable=True),
+    sa.Column('Mensagem', sa.String(length=255), nullable=True),
+    sa.Column('Assunto', sa.String(length=255), nullable=True),
+    sa.Column('Datamensagem', sa.DateTime(), nullable=True),
+    sa.Column('TipoMensagem', sa.String(length=255), nullable=True),
+    sa.Column('IDCorretorResponsavel', sa.Integer(), nullable=True),
+    sa.Column('IDGerenteCorretorResponsavel', sa.Integer(), nullable=True),
+    sa.Column('IDProduto', sa.Integer(), nullable=True),
+    sa.Column('IDCanal', sa.Integer(), nullable=True),
+    sa.Column('IDSubCanal', sa.Integer(), nullable=True),
+    sa.Column('IDMomento', sa.Integer(), nullable=True),
+    sa.Column('IDSubMomento', sa.Integer(), nullable=True),
+    sa.Column('IDMidia', sa.Integer(), nullable=True),
+    sa.Column('IDGrupoMidia', sa.Integer(), nullable=True),
+    sa.Column('IDEmail', sa.Integer(), nullable=True),
+    sa.Column('IDTel', sa.Integer(), nullable=True),
+    sa.Column('IDResponsavelCliente', sa.Integer(), nullable=True),
+    sa.Column('NomeCliente', sa.String(length=255), nullable=False),
+    sa.ForeignKeyConstraint(['IDCanal'], ['hy_dim_canal.IDCanal'], ),
+    sa.ForeignKeyConstraint(['IDGrupoMidia'], ['hy_dim_grupo_midia.id'], ),
+    sa.ForeignKeyConstraint(['IDMidia'], ['hy_dim_midia.id'], ),
+    sa.ForeignKeyConstraint(['IDMomento'], ['hy_dim_momento.IDMomento'], ),
+    sa.ForeignKeyConstraint(['IDProduto'], ['hy_products.CodProduto'], ),
+    sa.ForeignKeyConstraint(['IDSubCanal'], ['hy_dim_sub_canal.IDSubCanal'], ),
+    sa.ForeignKeyConstraint(['IDSubMomento'], ['hy_dim_sub_momento.IDSubMomento'], ),
+    sa.PrimaryKeyConstraint('IDMensagemCliente')
+    )
+    op.create_table('hy_message_brooker_relationship',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('IDMensagemCliente', sa.Integer(), nullable=True),
+    sa.Column('IDCorretorResponsavel', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['IDCorretorResponsavel'], ['hy_message_brooker.IDCorretorResponsavel'], ),
+    sa.ForeignKeyConstraint(['IDMensagemCliente'], ['hy_message.IDMensagemCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_message_email',
+    sa.Column('IDMensagemCliente', sa.Integer(), nullable=False),
+    sa.Column('email', sa.String(length=255), nullable=False),
+    sa.Column('email_number', sa.Integer(), nullable=False),
+    sa.ForeignKeyConstraint(['IDMensagemCliente'], ['hy_message.IDMensagemCliente'], ),
+    sa.PrimaryKeyConstraint('IDMensagemCliente')
+    )
+    op.create_table('hy_message_manager_relationship',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('IDMensagemCliente', sa.Integer(), nullable=True),
+    sa.Column('IDGerenteCorretorResponsavel', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['IDGerenteCorretorResponsavel'], ['hy_message_manager.IDGerenteCorretorResponsavel'], ),
+    sa.ForeignKeyConstraint(['IDMensagemCliente'], ['hy_message.IDMensagemCliente'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('hy_message_tel',
+    sa.Column('IDMensagemCliente', sa.Integer(), nullable=False),
+    sa.Column('tel', sa.String(length=2), nullable=False),
+    sa.Column('tel_ddd', sa.String(length=2), nullable=True),
+    sa.Column('tel_type', sa.String(length=20), nullable=False),
+    sa.ForeignKeyConstraint(['IDMensagemCliente'], ['hy_message.IDMensagemCliente'], ),
+    sa.PrimaryKeyConstraint('IDMensagemCliente')
+    )
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('hy_message_tel')
+    op.drop_table('hy_message_manager_relationship')
+    op.drop_table('hy_message_email')
+    op.drop_table('hy_message_brooker_relationship')
+    op.drop_table('hy_message')
+    op.drop_table('hy_message_manager')
+    op.drop_table('hy_message_brooker')
+    op.drop_table('hy_dim_temperatura')
+    op.drop_table('hy_dim_sub_momento')
+    op.drop_table('hy_dim_sub_canal')
+    op.drop_table('hy_dim_momento')
+    op.drop_table('hy_dim_midia')
+    op.drop_table('hy_dim_grupo_midia')
+    op.drop_table('hy_dim_canal')
+    # ### end Alembic commands ###
+
+----- migrations/versions/4f6274db1132_fix_nullable_fields_model_products.py -----
+"""fix nullable fields  model products
+
+Revision ID: 4f6274db1132
+Revises: dd7248abb3c0
+Create Date: 2024-05-28 00:15:54.712416
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import mysql
+
+# revision identifiers, used by Alembic.
+revision: str = '4f6274db1132'
+down_revision: Union[str, None] = 'dd7248abb3c0'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.alter_column('hy_product_addresses', 'Cep',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_addresses', 'Logradouro',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_addresses', 'Numero',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_addresses', 'Complemento',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_addresses', 'Estado',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_addresses', 'Cidade',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_addresses', 'Bairro',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TipoUnidade',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_units', 'Finalidade',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_units', 'Transacao',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalComodos',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalDormitorio',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalAreaUtil',
+               existing_type=mysql.FLOAT(),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalAreaTotal',
+               existing_type=mysql.FLOAT(),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalSuite',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalBanheiro',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalVaga',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=True)
+    op.alter_column('hy_product_units', 'TotalPeDireito',
+               existing_type=mysql.FLOAT(),
+               nullable=True)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.alter_column('hy_product_units', 'TotalPeDireito',
+               existing_type=mysql.FLOAT(),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalVaga',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalBanheiro',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalSuite',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalAreaTotal',
+               existing_type=mysql.FLOAT(),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalAreaUtil',
+               existing_type=mysql.FLOAT(),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalDormitorio',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TotalComodos',
+               existing_type=mysql.INTEGER(display_width=11),
+               nullable=False)
+    op.alter_column('hy_product_units', 'Transacao',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_units', 'Finalidade',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_units', 'TipoUnidade',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Bairro',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Cidade',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Estado',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Complemento',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Numero',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Logradouro',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    op.alter_column('hy_product_addresses', 'Cep',
+               existing_type=mysql.VARCHAR(length=255),
+               nullable=False)
+    # ### end Alembic commands ###
+
+----- migrations/versions/fcac718a03a7_remove_bridge_tables_on_messages_model.py -----
+"""remove bridge tables on messages model
+
+Revision ID: fcac718a03a7
+Revises: 12c6503b0957
+Create Date: 2024-06-07 00:04:55.398120
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import mysql
+
+# revision identifiers, used by Alembic.
+revision: str = 'fcac718a03a7'
+down_revision: Union[str, None] = '12c6503b0957'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('hy_message_brooker_relationship')
+    op.drop_table('hy_message_manager_relationship')
+    op.create_foreign_key(None, 'hy_message', 'hy_message_brooker', ['IDCorretorResponsavel'], ['IDCorretorResponsavel'])
+    op.create_foreign_key(None, 'hy_message', 'hy_message_manager', ['IDGerenteCorretorResponsavel'], ['IDGerenteCorretorResponsavel'])
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_constraint(None, 'hy_message', type_='foreignkey')
+    op.drop_constraint(None, 'hy_message', type_='foreignkey')
+    op.create_table('hy_message_manager_relationship',
+    sa.Column('id', mysql.INTEGER(display_width=11), autoincrement=True, nullable=False),
+    sa.Column('IDMensagemCliente', mysql.INTEGER(display_width=11), autoincrement=False, nullable=True),
+    sa.Column('IDGerenteCorretorResponsavel', mysql.INTEGER(display_width=11), autoincrement=False, nullable=True),
+    sa.ForeignKeyConstraint(['IDGerenteCorretorResponsavel'], ['hy_message_manager.IDGerenteCorretorResponsavel'], name='hy_message_manager_relationship_ibfk_1'),
+    sa.ForeignKeyConstraint(['IDMensagemCliente'], ['hy_message.IDMensagemCliente'], name='hy_message_manager_relationship_ibfk_2'),
+    sa.PrimaryKeyConstraint('id'),
+    mysql_collate='utf8mb4_general_ci',
+    mysql_default_charset='utf8mb4',
+    mysql_engine='InnoDB'
+    )
+    op.create_table('hy_message_brooker_relationship',
+    sa.Column('id', mysql.INTEGER(display_width=11), autoincrement=True, nullable=False),
+    sa.Column('IDMensagemCliente', mysql.INTEGER(display_width=11), autoincrement=False, nullable=True),
+    sa.Column('IDCorretorResponsavel', mysql.INTEGER(display_width=11), autoincrement=False, nullable=True),
+    sa.ForeignKeyConstraint(['IDCorretorResponsavel'], ['hy_message_brooker.IDCorretorResponsavel'], name='hy_message_brooker_relationship_ibfk_1'),
+    sa.ForeignKeyConstraint(['IDMensagemCliente'], ['hy_message.IDMensagemCliente'], name='hy_message_brooker_relationship_ibfk_2'),
+    sa.PrimaryKeyConstraint('id'),
+    mysql_collate='utf8mb4_general_ci',
+    mysql_default_charset='utf8mb4',
+    mysql_engine='InnoDB'
+    )
+    # ### end Alembic commands ###
+
+----- migrations/env.py -----
+from logging.config import fileConfig
+
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
+
+from alembic import context
+
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+config = context.config
+if os.getenv('RUNNING_IN_DOCKER') == 'true':
+    config.set_main_option('sqlalchemy.url', os.getenv('DATABASE_URL'))
+else:
+    config.set_main_option('sqlalchemy.url', os.getenv('DATABASE_URL_LOCAL'))
+
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# add your model's MetaData object here
+# for 'autogenerate' support
+#from models.models import Base
+
+# Importa o objeto Base que contém a metadados de todas as models
+from models import Base
+target_metadata = Base.metadata
+#target_metadata = None
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode.
+
+    This configures the context with just a URL
+    and not an Engine, though an Engine is acceptable
+    here as well.  By skipping the Engine creation
+    we don't even need a DBAPI to be available.
+
+    Calls to context.execute() here emit the given string to the
+    script output.
+
+    """
+    url = config.get_main_option("sqlalchemy.url")
+
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode.
+
+    In this scenario we need to create an Engine
+    and associate a connection with the context.
+
+    """
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection, target_metadata=target_metadata
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+----- migrations/script.py.mako -----
+"""${message}
+
+Revision ID: ${up_revision}
+Revises: ${down_revision | comma,n}
+Create Date: ${create_date}
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+${imports if imports else ""}
+
+# revision identifiers, used by Alembic.
+revision: str = ${repr(up_revision)}
+down_revision: Union[str, None] = ${repr(down_revision)}
+branch_labels: Union[str, Sequence[str], None] = ${repr(branch_labels)}
+depends_on: Union[str, Sequence[str], None] = ${repr(depends_on)}
+
+
+def upgrade() -> None:
+    ${upgrades if upgrades else "pass"}
+
+
+def downgrade() -> None:
+    ${downgrades if downgrades else "pass"}
+
+----- __init__.py -----
+
+----- ESTRUTURA DE DIRETÓRIOS -----
+.
+|-- Dockerfile
+|-- README.md
+|-- __init__.py
+|-- alembic.ini
+|-- api-exto.log
+|-- crontab
+|-- docker-compose.yml
+|-- functions
+|   |-- __init__.py
+|   |-- __pycache__
+|   |   |-- __init__.cpython-311.pyc
+|   |   |-- __init__.cpython-312.pyc
+|   |   |-- db_config.cpython-311.pyc
+|   |   |-- db_config.cpython-312.pyc
+|   |   `-- general.cpython-312.pyc
+|   |-- db_config.py
+|   |-- general.py
+|   `-- hypnobox
+|       |-- __init__.py
+|       |-- __pycache__
+|       |   |-- __init__.cpython-311.pyc
+|       |   |-- __init__.cpython-312.pyc
+|       |   |-- auth.cpython-312.pyc
+|       |   |-- clients.cpython-311.pyc
+|       |   |-- clients.cpython-312.pyc
+|       |   |-- log_handler.cpython-312.pyc
+|       |   |-- products.cpython-312.pyc
+|       |   `-- results_handler.cpython-312.pyc
+|       |-- auth.py
+|       |-- clients.py
+|       |-- log_handler.py
+|       |-- messages.py
+|       |-- products.py
+|       |-- results_handler.py
+|       `-- updaters
+|           |-- __init__.py
+|           |-- __pycache__
+|           |   |-- __init__.cpython-310.pyc
+|           |   |-- __init__.cpython-312.pyc
+|           |   |-- update_clients.cpython-312.pyc
+|           |   |-- update_messages.cpython-310.pyc
+|           |   |-- update_products.cpython-310.pyc
+|           |   `-- update_products.cpython-312.pyc
+|           |-- update_clients.py
+|           |-- update_messages.py
+|           `-- update_products.py
+|-- migrations
+|   |-- README
+|   |-- __pycache__
+|   |   `-- env.cpython-310.pyc
+|   |-- env.py
+|   |-- script.py.mako
+|   `-- versions
+|       |-- 12c6503b0957_fix_relationships_on_model_messages.py
+|       |-- 1f524a6aa35b_add_model_products.py
+|       |-- 4023308b75b4_initial_commit.py
+|       |-- 4f6274db1132_fix_nullable_fields_model_products.py
+|       |-- 9abfa39d8118_alter_nullable_fields_on_job_logs.py
+|       |-- __pycache__
+|       |   |-- 12c6503b0957_fix_relationships_on_model_messages.cpython-310.pyc
+|       |   |-- 1f524a6aa35b_add_model_products.cpython-310.pyc
+|       |   |-- 4023308b75b4_initial_commit.cpython-310.pyc
+|       |   |-- 4f6274db1132_fix_nullable_fields_model_products.cpython-310.pyc
+|       |   |-- 7860e7aaab0e_add_messages_class.cpython-310.pyc
+|       |   |-- 9a116eac8e75_add_messages_class.cpython-310.pyc
+|       |   |-- 9abfa39d8118_alter_nullable_fields_on_job_logs.cpython-310.pyc
+|       |   |-- ae66cf4f11e1_add_model_messages.cpython-310.pyc
+|       |   |-- c807a1e687bd_cleaning_code_on_messages_model.cpython-310.pyc
+|       |   |-- cafe159049b5_fix_relationship_dim_tables_on_messages_.cpython-310.pyc
+|       |   |-- db5c20e7719d_fix_add_messages_class.cpython-310.pyc
+|       |   |-- dd7248abb3c0_fix_cod_interno_model_products.cpython-310.pyc
+|       |   |-- f09688da9d02_add_model_messages.cpython-310.pyc
+|       |   `-- fcac718a03a7_remove_bridge_tables_on_messages_model.cpython-310.pyc
+|       |-- c807a1e687bd_cleaning_code_on_messages_model.py
+|       |-- dd7248abb3c0_fix_cod_interno_model_products.py
+|       |-- f09688da9d02_add_model_messages.py
+|       `-- fcac718a03a7_remove_bridge_tables_on_messages_model.py
+|-- misc
+|   |-- atalhos_uteis.txt
+|   |-- cache_clear.bash
+|   |-- client_response_sample.json
+|   |-- db_examples
+|   |   |-- create_accounts.py
+|   |   |-- db_crud.py
+|   |   |-- db_work_bulk_add_example.py
+|   |   `-- db_work_example.py
+|   |-- example_message_response.json
+|   |-- gpt_context.txt
+|   |-- hard_reset_docker.sh
+|   |-- make_db.sh
+|   |-- project_context.sh
+|   `-- trash
+|       |-- 1b5ee6bc6e6a_mudando_campo_datanascimento_da_tabela_.py
+|       |-- 2be121c2a91d_fix_split_clients_table_into_multiple_.py
+|       |-- 2ec56924767d_incluindo_cascade_na_opção_de_delete.py
+|       |-- 3cf43f2df479_fix_2_split_clients_table_into_multiple_.py
+|       |-- 3e7e793eecc3_fix_3_split_clients_table_into_multiple_.py
+|       |-- 46368b06d149_add_client_model.py
+|       |-- 870312a99bcb_ajuste_tamanho_varchar.py
+|       |-- 8a0813cac487_mudando_campo_datanascimento_da_tabela_.py
+|       |-- a0c2b4deb5c1_add_job_logs_table.py
+|       |-- aa6bbb904240_initial_commit.py
+|       |-- b90ea8945dfa_update_client_table_structure_to_.py
+|       |-- ba320a7a4fae_transferindo_coluna_objetivo_para_.py
+|       |-- bc41758dc686_add_client_model.py
+|       |-- c6cc1b0f7ff1_update_relationship_tables.py
+|       |-- cbfa122573a5_split_clients_table_into_multiple_tables.py
+|       |-- d6e3cf6f9b5b_prefixo_hy_em_tabelas_e_classes.py
+|       |-- ed74233c0792_update_client_table_structure.py
+|       |-- ef61ce7aaa42_update_client_table_structure_to_.py
+|       `-- fe86a48b882e_incluir_prefixo_client_nas_classes_de_.py
+|-- models
+|   |-- __init__.py
+|   |-- __pycache__
+|   |   |-- __init__.cpython-310.pyc
+|   |   |-- __init__.cpython-312.pyc
+|   |   |-- hy_client.cpython-310.pyc
+|   |   |-- hy_client.cpython-312.pyc
+|   |   |-- hy_messages.cpython-310.pyc
+|   |   |-- hy_messages.cpython-312.pyc
+|   |   |-- hy_products.cpython-310.pyc
+|   |   |-- hy_products.cpython-312.pyc
+|   |   |-- log.cpython-310.pyc
+|   |   `-- log.cpython-312.pyc
+|   |-- hy_client.py
+|   |-- hy_messages.py
+|   |-- hy_products.py
+|   `-- log.py
+`-- requirements.txt

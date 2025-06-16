@@ -1,0 +1,18 @@
+# Libs para lidar com regionalização
+DateTime>=5.4
+pytz>=2024.1
+
+#Libs para lidar com variáveis de ambiente
+python-dotenv>=0.20.0
+
+# Libs para lidar com banco de dados
+SQLAlchemy>=1.4.35
+alembic>=1.8.0
+alembic[tz]
+pymysql
+
+# Libs para trabalhar com banco requisições API
+requests>=2.25.1
+
+# DEV by Tracker Hub
+# Updateline: 7

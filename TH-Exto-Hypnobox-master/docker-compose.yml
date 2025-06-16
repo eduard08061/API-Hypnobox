@@ -1,0 +1,36 @@
+version: '3.8'
+services:
+
+  python:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - log-volume:/var/log/th-exto-hypnobox
+    depends_on:
+      - db
+    environment:
+      - DATABASE_URL=${MYSQL_ENVIRONMENT}://${MYSQL_USER}:${MYSQL_PASSWORD}@db/${MYSQL_DATABASE}
+      - RUNNING_IN_DOCKER=true
+
+    command: >
+      sh -c "dockerize -wait tcp://db:3306 -timeout 30s && crontab /app/crontab && cron -f"
+
+  db:
+    image: mariadb
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - data:/var/lib/mysql
+    ports:
+      - "${MYSQL_PORT}:3306" # host:container
+
+volumes:
+  data:
+  log-volume:
+    driver: local

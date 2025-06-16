@@ -1,0 +1,69 @@
+{
+    "Paginacao": {
+        "NumerodeMensagens": 13348,
+        "NumerodePaginas": 534,
+        "PaginaAtual": 1,
+        "TotalPorPagina": 25
+    },
+
+    "Mensagens": [
+        {
+            "TipoMensagem": "ENTRADA",
+            "Datamensagem": "2024-01-02 00:09:41",
+            "Mensagem": ",Olá corretor, você acabou de receber um lead!\nAbaixo você terá algumas respostas qualificatórias que ele preencheu:\n\nComo prefere ser contatado? Whatsapp.",
+            "Assunto": "",
+            
+            "DataAtribuicao": "2024-01-02 11:00:16",
+            "CNA": "0",
+            "ClienteNovo": "1",
+            "StatusMenssagem": "DIRECIONADA",
+
+            "NomeCliente": "Marcioengenharia",
+            "IDCliente": "168685",
+            "IDMensagemCliente": "151633",
+
+            "IDCorretorResponsavel": "888",
+            "NomeCorretorResponsavel": "Diana",
+            "EmailCorretorResponsavel": "diana.costa@exto.com.br",
+            
+            "IDGerenteCorretorResponsavel": "6",
+            "NomeGerenteCorretorResponsavel": "Paulo Torres",
+            "EmailGerenteCorretorResponsavel": "paulo@exto.com.br",
+            
+            "IDResponsavelCliente": "1149",
+            "IDResponsavelClienteCompartilhado": null,
+
+            "Telmensagem": "(11) 96241-8933",
+            
+            "TelDDDResidencial": "00",
+            "TelResidencial": null,
+            
+            "TelDDDCelular": "11",
+            "TelCelular": "96241-8933",
+            
+            "Email1Cliente": "Marcio.74477@hotmsil.com",
+            "Email2Cliente": null,
+            "Email3Cliente": null,
+            
+            "IDCanal": "2",
+            "NomeCanal": "Mensagem",
+            
+            "IDSubCanal": null,
+            "NomeSubCanal": null,
+            
+            "Midia": "UL_FB",
+            "GrupoMidia": "UL_FB",
+            
+            "IDProduto": "59",
+            "NomeProduto": "Blue Home Resort Jockey", 
+            
+            "IDMomento": "2",
+            "NomeMomento": "Pesquisa",
+            
+            "IDSubMomento": "36",
+            "NomeSubMomento": "Em contato",
+            
+            "IDTemperatura": "2",
+            "NomeTemperatura": "Frio"
+        }]
+       }
